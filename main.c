@@ -28,7 +28,7 @@ static pthread_mutex_t redis_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 void parseInfo(char text[], redis_info* master)
 {
-    char * token = strtok(text, "\n");
+    char* token = strtok(text, "\n");
     char* last_line;
     while( token != NULL ) {
             last_line = token;
@@ -79,10 +79,11 @@ void initRedisData(redisContext *sc, redis_info** master)
 		freeReplyObject(reply);
 		return;
 	}	
-	printf("INFO Sentinel: \n %s \n", reply->str);		
+	//printf("INFO Sentinel: \n %s \n", reply->str);		
 	parseInfo(reply->str, my_master);
 	my_master->initialized = true;	
     freeReplyObject(reply);
+    printf("New redis master - %s: address %s port %i \n", my_master->name, my_master->address, my_master->port);
 }
 
 void enterEmergencyMode(){};
@@ -128,20 +129,41 @@ void connectToRedisServer(const redis_info* master_data, struct timeval timeout,
     }
 }
 
+redisContext* connectToSentinels(const sentinel_info* sentinel, const struct timeval mTimeout)
+{	
+    printf("Connecting to sentinel on %s:%i\n", sentinel->hostname, sentinel->port);
+    redisContext* sentContext = redisConnectWithTimeout(sentinel->hostname, sentinel->port, mTimeout);
+    if(sentContext == NULL || sentContext->err)
+    {
+        printf("Cannot connect to sentinel %s:%i\n", sentinel->hostname, sentinel->port);
+        if(sentContext)
+        {
+            redisFree(sentContext);
+        }
+    }
+    else
+    {
+        printf("Connected to sentinel on %s:%i\n", sentinel->hostname, sentinel->port);
+    }
+    return sentContext;
+}
+
+
 int main(int argc, char **argv) {
 	
 	// Read input arguments
 	if(argc < 4)
 	{
-		printf("Not enough arguments!");
+		printf("Not enough arguments! \n");
+        return -1;
 	}	
 	double timeout =  atof(argv[argc-2]);
 	struct timeval mTimeout = {(int)(floor(timeout)), timeout - floor(timeout)};
 	int redis_index =  atoi(argv[argc-1]);
 	int num_sent = argc-3;
 
-    // Setup sentinels  data
-    struct sentinel_info* my_sentinels[num_sent];    
+    //Setup sentinels  data
+    sentinel_info* my_sentinels[num_sent];    
     for (int i =0; i<num_sent; i++)
     {
         my_sentinels[i] = calloc(1, sizeof(struct sentinel_info));
@@ -149,49 +171,38 @@ int main(int argc, char **argv) {
         my_sentinels[i]->hostname = calloc(1, (strlen(hostname) + 1) * sizeof(char));
         strcpy(my_sentinels[i]->hostname, hostname);
         my_sentinels[i]->port = atoi(strtok(NULL, ":"));
-        printf("SENTINEL FOUND Address %s port %i \n", my_sentinels[i]->hostname, my_sentinels[i]->port);
+        printf("New sentinel - address %s port %i \n", my_sentinels[i]->hostname, my_sentinels[i]->port);
     }
 
-    redisContext *sentContext = NULL;
 
-    // Connect with at least one of sentinels  
-    for (int j=0; j< num_sent; j++)
-    {	
-        printf("Connecting to sentinel on %s:%i\n", my_sentinels[j]->hostname, my_sentinels[j]->port);
-        sentContext = redisConnectWithTimeout(my_sentinels[j]->hostname, my_sentinels[j]->port, mTimeout);
-        if(sentContext == NULL || sentContext->err)
+    redis_info* master_data = NULL;
+    redisContext *sentContext = NULL;
+    // while (true)
+    // {
+        if(sentContext == NULL)
         {
-            printf("Cannot connect to sentinel %s:%i\n", my_sentinels[j]->hostname, my_sentinels[j]->port);
-            if(sentContext)
+            // Try to connect of one of sentinels
+            for (int j=0; j< num_sent; j++)
             {
-                redisFree(sentContext);
-                sleep(3);
+                sentContext = connectToSentinels(my_sentinels[j], mTimeout);
+                if(sentContext != NULL)
+                {
+                    break;
+                }
             }
         }
-        else
-        {
-            printf("Connected to sentinel on %s:%i\n", my_sentinels[j]->hostname, my_sentinels[j]->port);
-            break;
-        }
-    }
-    
-    // if(sentContext == NULL)
-    // {
-    // 	enterEmergencyMode();
-    // }
-    
-    // /*redisReply *reply;
-    // reply = redisCommand(sentContext, "PING");
-    // printf("PING: %s \n", reply->str);
-    // freeReplyObject(reply);*/
-    
-    // Get information about redis server
-    struct redis_info* master_data;
-    initRedisData(sentContext, &master_data);	
-    
-    // CONNECTING TO REDIS	
-    connectToRedisServer(master_data, mTimeout, redis_index);
 
+        if(sentContext != NULL)
+        {
+            printf("Acquiring information about master \n");
+            // Get information about redis server from sentinel            
+            initRedisData(sentContext, &master_data);	
+            
+            // CONNECTING TO REDIS	
+            connectToRedisServer(master_data, mTimeout, redis_index);
+        }
+        sleep(3);
+    //}
 
 	return 0;        
 }
