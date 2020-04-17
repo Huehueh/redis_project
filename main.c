@@ -11,7 +11,11 @@ static const char* OK_REPLY="OK";
 static const char* PING_REPLY="PONG";
 static const char* NO_EXPECTED_REPLY="";
 static const uint  REDIS_MAX_RETRY_COUNT = 2;
+static pthread_mutex_t redis_mtx = PTHREAD_MUTEX_INITIALIZER;
 
+/**
+ * Structure containing data about redis.
+ */
 typedef struct redis_info 
 {
     char* id;
@@ -20,14 +24,20 @@ typedef struct redis_info
     uint16_t port;
 } redis_info;
 
+/**
+ * Structure containing data about sentinel.
+ */
 typedef struct sentinel_info 
 {
 	char* hostname;
 	uint16_t port;
 } sentinel_info;
 
-static pthread_mutex_t redis_mtx = PTHREAD_MUTEX_INITIALIZER;
-
+/**
+ * Parses response for the query "Info" from sentinel and writes the data into redis_info container
+ * @param text Text of reply from sentinel
+ * @param master Redis data container
+ */
 void parseInfo(char text[], redis_info* master)
 {
     char* token = strtok(text, "\n");
@@ -61,6 +71,12 @@ void parseInfo(char text[], redis_info* master)
     master->port = atoi(strtok(NULL, ":"));
 }
 
+/**
+ * Checks if the redis reply and context are valid.
+ * @param context Context of redis
+ * @param reply Reply from redis.
+ * @param expectedReply Expected body of reply.
+ */
 bool checkResult(const redisContext *context, const redisReply* reply, const char* expectedReply)
 {
     if(!context || context->err != REDIS_OK || !reply)
@@ -80,6 +96,11 @@ bool checkResult(const redisContext *context, const redisReply* reply, const cha
     return false;
 }
 
+/**
+ * Inquires sentinel about the redis data and fills redis_info structure with these data.
+ * @param sc Context of sentinel.
+ * @param master Container for information about redis.
+ */
 bool initRedisData(redisContext *sc, redis_info** master)
 {
 	printf("Acquiring information about master \n");
@@ -103,12 +124,20 @@ bool initRedisData(redisContext *sc, redis_info** master)
     return true;
 }
 
+/**
+ * Enter emergency mode.
+ */
 void enterEmergencyMode()
 {
     printf("EMERGENCY.\n");
     sleep(5);
 };
 
+/**
+ * Sends request to redis to select given index.
+ * @param rc Context of redis.
+ * @param redis_index Redis database index.
+ */
 int selectRedisDb(redisContext *rc, int redis_index)
 {
     pthread_mutex_lock(&redis_mtx);
@@ -129,6 +158,11 @@ int selectRedisDb(redisContext *rc, int redis_index)
     return 1;
 }
 
+/**
+ * Connects to redis server.
+ * @param master_data Information about redis we want to connect to.
+ * @param timeout Timeout for the redis connection.
+ */
 redisContext* connectToRedisServer(const redis_info* master_data, struct timeval timeout)
 {
     redisContext* rc = NULL;
@@ -167,7 +201,11 @@ redisContext* connectToRedisServer(const redis_info* master_data, struct timeval
     return rc;
 }
 
-
+/**
+ * Connects to sentinel.
+ * @param sentinel Information about sentinel we want to connect to.
+ * @param mTimeout Timeout for the connection.
+ */
 redisContext* connectToSentinel(const sentinel_info* sentinel, const struct timeval mTimeout)
 {	
     printf("Connecting to sentinel on %s:%i\n", sentinel->hostname, sentinel->port);
@@ -188,6 +226,12 @@ redisContext* connectToSentinel(const sentinel_info* sentinel, const struct time
     return sentContext;
 }
 
+/**
+ * Sends continuous requests to redis.
+ * @param rc Redis context.o.
+ * @param master_data Information about redis.
+ * @param redis_index Database index.
+ */
 void sendRequestsToRedis(redisContext* rc, redis_info* master_data, int redis_index)
 {
     while(true)
@@ -200,7 +244,6 @@ void sendRequestsToRedis(redisContext* rc, redis_info* master_data, int redis_in
         sleep(3);
     } 
 }
-
 
 int main(int argc, char **argv) {
 	
