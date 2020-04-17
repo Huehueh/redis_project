@@ -8,6 +8,7 @@
 #include <pthread.h>
 
 static const char* OK_REPLY="OK";
+static const char* PING_REPLY="PONG";
 static const char* NO_EXPECTED_REPLY="";
 static const uint  REDIS_MAX_RETRY_COUNT = 2;
 
@@ -17,7 +18,6 @@ typedef struct redis_info
     char* name; 
     char* address;
     uint16_t port;
-	bool initialized;
 } redis_info;
 
 typedef struct sentinel_info 
@@ -36,15 +36,16 @@ void parseInfo(char text[], redis_info* master)
             last_line = token;
             token = strtok(NULL, "\n");
     }
-    //printf("Parsing the text: %s \n", last_line);
+    printf("Parsing the text: %s \n", last_line);
     
     master->id = strtok(last_line, ":");
+    printf("Przed");
     char*array[5];
     for (int i = 0; i < 5; i++)
     {
         array[i] = strtok(NULL, ",");
     }
-        
+        printf("Przed");
     strtok(array[0], "=");
 	// redis master name
 	master->name = strtok(NULL, "=");
@@ -52,7 +53,11 @@ void parseInfo(char text[], redis_info* master)
 	
     // redis master address & port
     strtok(array[2], "=");
-    master->address = strtok(NULL, ":");
+    printf("Przed");
+    char* tmp = strtok(NULL, ":");
+    printf("Address: %s", tmp);
+    master->address = malloc(strlen(tmp)+1);
+    strcpy(master->address,tmp);
     master->port = atoi(strtok(NULL, ":"));
 }
 
@@ -60,7 +65,6 @@ bool checkResult(const redisContext *context, const redisReply* reply, const cha
 {
     if(!context || context->err != REDIS_OK || !reply)
     {
-        printf("nope \n");
         return false;
     }
     
@@ -78,9 +82,10 @@ bool checkResult(const redisContext *context, const redisReply* reply, const cha
 
 bool initRedisData(redisContext *sc, redis_info** master)
 {
-	*master = calloc(1, sizeof(struct redis_info));
+	printf("Acquiring information about master \n");
+    *master = calloc(1, sizeof(struct redis_info));
 	redis_info* my_master = *master;
-    my_master->initialized = false;
+
 	redisReply *reply = redisCommand(sc, "INFO Sentinel");	
 	if(!checkResult(sc, reply, NO_EXPECTED_REPLY))
 	{
@@ -93,15 +98,15 @@ bool initRedisData(redisContext *sc, redis_info** master)
 	}	
 	//printf("INFO Sentinel: \n %s \n", reply->str);		
 	parseInfo(reply->str, my_master);
-	my_master->initialized = true;	
     freeReplyObject(reply);
-    printf("New redis master - %s: address %s port %i \n (information from sentinel %s:%i) \n", my_master->name, my_master->address, my_master->port, sc->tcp.source_addr, sc->tcp.port);
+    printf("New redis master - %s: address %s port %i \n (information from sentinel %s:%i) \n", my_master->name, my_master->address, my_master->port, sc->tcp.host, sc->tcp.port);
     return true;
 }
 
 void enterEmergencyMode()
 {
-    printf("Entering emergency mode.\n");
+    printf("EMERGENCY.\n");
+    sleep(5);
 };
 
 int selectRedisDb(redisContext *rc, int redis_index)
@@ -127,13 +132,11 @@ int selectRedisDb(redisContext *rc, int redis_index)
 redisContext* connectToRedisServer(const redis_info* master_data, struct timeval timeout)
 {
     redisContext* rc = NULL;
-    char tmp[20];
-    strcpy(tmp,master_data->address);
-    printf("Connecting to redis on %s:%i\n", tmp, master_data->port); 
-    rc = redisConnectWithTimeout(tmp, master_data->port, timeout);
+    printf("Connecting to redis on %s:%i\n", master_data->address, master_data->port); 
+    rc = redisConnectWithTimeout(master_data->address, master_data->port, timeout);
     if(rc == NULL || rc->err)
     {
-            printf("Cannot connect to redis %s:%i\n", tmp, master_data->port);
+            printf("Cannot connect to redis %s:%i\n", master_data->address, master_data->port);
             if(rc)
             {
                 printf("Connection error: %s\n", rc->errstr);
@@ -147,7 +150,7 @@ redisContext* connectToRedisServer(const redis_info* master_data, struct timeval
             return rc;
     }
     
-    printf("Connected to redis %s:%i\n",tmp, master_data->port);
+    printf("Connected to redis %s:%i\n", master_data->address, master_data->port);
 
     redisReply* reply = redisCommand(rc, "AUTH huehue1");
     if(!checkResult(rc, reply, OK_REPLY))
@@ -165,7 +168,7 @@ redisContext* connectToRedisServer(const redis_info* master_data, struct timeval
 }
 
 
-redisContext* connectToSentinels(const sentinel_info* sentinel, const struct timeval mTimeout)
+redisContext* connectToSentinel(const sentinel_info* sentinel, const struct timeval mTimeout)
 {	
     printf("Connecting to sentinel on %s:%i\n", sentinel->hostname, sentinel->port);
     redisContext* sentContext = redisConnectWithTimeout(sentinel->hostname, sentinel->port, mTimeout);
@@ -183,6 +186,19 @@ redisContext* connectToSentinels(const sentinel_info* sentinel, const struct tim
         printf("Connected to sentinel on %s:%i\n", sentinel->hostname, sentinel->port);
     }
     return sentContext;
+}
+
+void sendRequestsToRedis(redisContext* rc, redis_info* master_data, int redis_index)
+{
+    while(true)
+    {
+        if(selectRedisDb(rc, redis_index) == 0)
+        {
+            printf("Disconnected with redis %s:%i\n", master_data->address, master_data->port);
+            return;
+        }  
+        sleep(3);
+    } 
 }
 
 
@@ -212,42 +228,70 @@ int main(int argc, char **argv) {
     }
     
     redisContext *sentContext = NULL;
+    redis_info* master_data = NULL;
     while (true)
     {       
+        if(sentContext != NULL)
+        {
+            // check if sentinel is still alive
+            redisReply* reply = redisCommand(sentContext, "PING");
+            if(!checkResult(sentContext, reply, PING_REPLY))
+            {
+                printf("Sentinel %s:%i does not reply \n", sentContext->tcp.source_addr, sentContext->tcp.port);
+                if(reply)
+                {
+                    freeReplyObject(reply);
+                }
+                redisFree(sentContext); 
+                sentContext = NULL;
+            }
+            freeReplyObject(reply);
+        }
+        
         if(sentContext == NULL)
         {
             // Try to connect of one of sentinels
             for (int j=0; j< num_sent; j++)
             {
-                printf("try new sentinel\n");
-                sentContext = connectToSentinels(my_sentinels[j], mTimeout);
-                if(sentContext != NULL && sentContext->err != 0)
+                sentContext = connectToSentinel(my_sentinels[j], mTimeout);
+                if(sentContext != NULL)
                 {
                     break;
                 }
             }
         }
-
-        if(sentContext != NULL)
+        if(sentContext == NULL)
         {
-            redis_info* master_data = NULL;
-            printf("Acquiring information about master \n");
-            // Get information about redis server from sentinel && connecting 
-            redisContext* rc;         
+           //try to connect to old redis
+           if(master_data)
+           {
+                redisContext* rc = connectToRedisServer(master_data, mTimeout);
+                bool connected = (rc != NULL);
+                if(!connected)
+                {
+                    enterEmergencyMode();
+                }
+                else
+                {
+                    sendRequestsToRedis(rc, master_data, redis_index);  
+                }
+           }
+           else
+           {
+               enterEmergencyMode();
+           }
+        }
+        else
+        {
+            // Get information about redis server from sentinel && connecting        
             if(initRedisData(sentContext, &master_data))	
             {	                
                 redisContext* rc = connectToRedisServer(master_data, mTimeout);
                 bool connected = (rc != NULL);
-                while(connected)
+                if(connected)
                 {
-                    int result = selectRedisDb(rc, redis_index);   
-                    if(result == 0)
-                    {
-                        printf("Disonnected with redis %s:%i\n", master_data->address, master_data->port);
-                        connected = false;
-                    }  
-                    sleep(3);
-                }    
+                    sendRequestsToRedis(rc, master_data, redis_index);   
+                }
             }
             else
             {
