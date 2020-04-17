@@ -46,16 +46,14 @@ void parseInfo(char text[], redis_info* master)
             last_line = token;
             token = strtok(NULL, "\n");
     }
-    printf("Parsing the text: %s \n", last_line);
     
     master->id = strtok(last_line, ":");
-    printf("Przed");
+    
     char*array[5];
     for (int i = 0; i < 5; i++)
     {
         array[i] = strtok(NULL, ",");
     }
-        printf("Przed");
     strtok(array[0], "=");
 	// redis master name
 	master->name = strtok(NULL, "=");
@@ -63,9 +61,7 @@ void parseInfo(char text[], redis_info* master)
 	
     // redis master address & port
     strtok(array[2], "=");
-    printf("Przed");
     char* tmp = strtok(NULL, ":");
-    printf("Address: %s", tmp);
     master->address = malloc(strlen(tmp)+1);
     strcpy(master->address,tmp);
     master->port = atoi(strtok(NULL, ":"));
